@@ -123,6 +123,22 @@ let test_shift_tab () =
   Alcotest.(check bool) "Shift-Tab" true
     (parse [0x1B; 0x5B; Char.code 'Z'] = Terminal.Shift_tab)
 
+let test_ctrl_space () =
+  Alcotest.(check bool) "Ctrl-Space (NUL)" true
+    (parse [0x00] = Terminal.Ctrl_space)
+
+let test_ctrl_y () =
+  Alcotest.(check bool) "Ctrl-Y" true
+    (parse [0x19] = Terminal.Ctrl_y)
+
+let test_ctrl_g () =
+  Alcotest.(check bool) "Ctrl-G" true
+    (parse [0x07] = Terminal.Ctrl_g)
+
+let test_alt_w () =
+  Alcotest.(check bool) "Alt-W (ESC w)" true
+    (parse [0x1B; Char.code 'w'] = Terminal.Alt_w)
+
 let test_bare_escape () =
   Alcotest.(check bool) "bare ESC" true
     (parse [0x1B] = Terminal.Escape)
@@ -149,6 +165,10 @@ let () =
       Alcotest.test_case "ctrl arrows" `Quick test_ctrl_arrows;
       Alcotest.test_case "alt paredit keys" `Quick test_alt_paredit_keys;
       Alcotest.test_case "shift tab" `Quick test_shift_tab;
+      Alcotest.test_case "Ctrl-Space" `Quick test_ctrl_space;
+      Alcotest.test_case "Ctrl-Y" `Quick test_ctrl_y;
+      Alcotest.test_case "Ctrl-G" `Quick test_ctrl_g;
+      Alcotest.test_case "Alt-W" `Quick test_alt_w;
       Alcotest.test_case "bare escape" `Quick test_bare_escape;
       Alcotest.test_case "empty input" `Quick test_empty_input;
     ];

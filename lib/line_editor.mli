@@ -143,3 +143,16 @@ val word_forward : string -> int -> int
 (** [word_backward text pos] returns the byte offset of the start of the
     previous word boundary before [pos]. *)
 val word_backward : string -> int -> int
+
+(** {1 Selection helpers (exposed for testing)} *)
+
+(** [region_bounds mark cursor] returns [Some (start, end_exclusive)] when
+    [mark] is [Some _], ordered so [start <= end_exclusive]. Returns [None]
+    when [mark] is [None]. *)
+val region_bounds : int option -> int -> (int * int) option
+
+(** [apply_selection_overlay line start_col end_col] injects ANSI reverse
+    video codes around visible columns [\[start_col, end_col)] in [line],
+    which may contain embedded ANSI escape codes. Returns the original
+    string unchanged when [start_col = end_col]. *)
+val apply_selection_overlay : string -> int -> int -> string
