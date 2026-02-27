@@ -159,6 +159,81 @@ let test_cursor_move_up_clamp () =
   let new_pos = Line_editor.pos_of_row_col text (row - 1) col in
   check_int "up clamp" 2 new_pos
 
+(* --- region_bounds --- *)
+
+let check_region msg expected actual =
+  let pp fmt = function
+    | None -> Format.fprintf fmt "None"
+    | Some (s, e) -> Format.fprintf fmt "Some (%d, %d)" s e
+  in
+  let eq a b = match a, b with
+    | None, None -> true
+    | Some (s1, e1), Some (s2, e2) -> s1 = s2 && e1 = e2
+    | _ -> false
+  in
+  let testable = Alcotest.testable pp eq in
+  Alcotest.check testable msg expected actual
+
+let test_region_bounds_no_mark () =
+  check_region "no mark" None (Line_editor.region_bounds None 5)
+
+let test_region_bounds_mark_before_cursor () =
+  check_region "mark before cursor" (Some (2, 7))
+    (Line_editor.region_bounds (Some 2) 7)
+
+let test_region_bounds_mark_after_cursor () =
+  check_region "mark after cursor" (Some (3, 10))
+    (Line_editor.region_bounds (Some 10) 3)
+
+let test_region_bounds_mark_equals_cursor () =
+  check_region "mark equals cursor" (Some (5, 5))
+    (Line_editor.region_bounds (Some 5) 5)
+
+(* --- apply_selection_overlay --- *)
+
+let check_str msg expected actual =
+  Alcotest.(check string) msg expected actual
+
+let test_overlay_plain_text () =
+  (* "hello world" with selection on visible columns [2, 5) → "he[7mllo[27m world" *)
+  let result = Line_editor.apply_selection_overlay "hello world" 2 5 in
+  check_str "plain mid" "he\x1b[7mllo\x1b[27m world" result
+
+let test_overlay_full_line () =
+  let result = Line_editor.apply_selection_overlay "abc" 0 3 in
+  check_str "full line" "\x1b[7mabc\x1b[27m" result
+
+let test_overlay_empty_selection () =
+  let result = Line_editor.apply_selection_overlay "abc" 2 2 in
+  check_str "empty selection" "abc" result
+
+let test_overlay_with_ansi () =
+  (* "\x1b[31mhello\x1b[0m world" — "hello" is red, selection on visible columns 2..7.
+     The \x1b[0m reset inside the selection must be followed by \x1b[7m to
+     re-establish reverse video, otherwise the space and 'w' lose highlighting. *)
+  let input = "\x1b[31mhello\x1b[0m world" in
+  let result = Line_editor.apply_selection_overlay input 2 7 in
+  check_str "with ansi"
+    "\x1b[31mhe\x1b[7mllo\x1b[0m\x1b[7m w\x1b[27morld" result
+
+let test_overlay_multiple_resets () =
+  (* Two styled tokens inside selection: each \x1b[0m must re-emit \x1b[7m.
+     The opening \x1b[31m precedes any visible char, so \x1b[7m is injected
+     at vis col 0 — after the color code but before the first char. *)
+  let input = "\x1b[31ma\x1b[0m \x1b[32mb\x1b[0m c" in
+  let result = Line_editor.apply_selection_overlay input 0 5 in
+  check_str "multiple resets"
+    ("\x1b[31m\x1b[7ma\x1b[0m\x1b[7m \x1b[32m\x1b[7mb\x1b[0m\x1b[7m c\x1b[27m")
+    result
+
+let test_overlay_at_start () =
+  let result = Line_editor.apply_selection_overlay "hello" 0 3 in
+  check_str "from start" "\x1b[7mhel\x1b[27mlo" result
+
+let test_overlay_at_end () =
+  let result = Line_editor.apply_selection_overlay "hello" 3 5 in
+  check_str "to end" "hel\x1b[7mlo\x1b[27m" result
+
 let () =
   Alcotest.run "Line_editor" [
     "cursor_row", [
@@ -199,5 +274,20 @@ let () =
       Alcotest.test_case "move up" `Quick test_cursor_move_up;
       Alcotest.test_case "move down" `Quick test_cursor_move_down;
       Alcotest.test_case "move up clamp" `Quick test_cursor_move_up_clamp;
+    ];
+    "region_bounds", [
+      Alcotest.test_case "no mark" `Quick test_region_bounds_no_mark;
+      Alcotest.test_case "mark before cursor" `Quick test_region_bounds_mark_before_cursor;
+      Alcotest.test_case "mark after cursor" `Quick test_region_bounds_mark_after_cursor;
+      Alcotest.test_case "mark equals cursor" `Quick test_region_bounds_mark_equals_cursor;
+    ];
+    "apply_selection_overlay", [
+      Alcotest.test_case "plain mid" `Quick test_overlay_plain_text;
+      Alcotest.test_case "full line" `Quick test_overlay_full_line;
+      Alcotest.test_case "empty selection" `Quick test_overlay_empty_selection;
+      Alcotest.test_case "with ansi" `Quick test_overlay_with_ansi;
+      Alcotest.test_case "multiple resets" `Quick test_overlay_multiple_resets;
+      Alcotest.test_case "from start" `Quick test_overlay_at_start;
+      Alcotest.test_case "to end" `Quick test_overlay_at_end;
     ];
   ]

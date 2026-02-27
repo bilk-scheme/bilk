@@ -39,6 +39,10 @@ type key =
   | Alt_ctrl_n
   | Alt_ctrl_p
   | Shift_tab
+  | Ctrl_space
+  | Ctrl_y
+  | Ctrl_g
+  | Alt_w
   | Escape
   | Unknown
 
@@ -131,18 +135,21 @@ let parse_key_bytes buf len =
     | 0x7F -> Backspace
     | 0x08 -> Backspace
     | 0x09 -> Tab
+    | 0x00 -> Ctrl_space
     | 0x01 -> Ctrl_a
     | 0x02 -> Ctrl_b
     | 0x03 -> Ctrl_c
     | 0x04 -> Ctrl_d
     | 0x05 -> Ctrl_e
     | 0x06 -> Ctrl_f
+    | 0x07 -> Ctrl_g
     | 0x0B -> Ctrl_k
     | 0x0C -> Ctrl_l
     | 0x0E -> Ctrl_n
     | 0x10 -> Ctrl_p
     | 0x15 -> Ctrl_u
     | 0x17 -> Ctrl_w
+    | 0x19 -> Ctrl_y
     | 0x1B ->
       if len = 1 then Escape
       else begin
@@ -183,6 +190,8 @@ let parse_key_bytes buf len =
           Alt_ctrl_n
         else if b1 = 0x10 then
           Alt_ctrl_p
+        else if b1 = Char.code 'w' then
+          Alt_w
         else
           Unknown
       end
@@ -229,6 +238,8 @@ let read_key t =
       Alt_open_paren
     else if b1 = Char.code '9' then
       Alt_9
+    else if b1 = Char.code 'w' then
+      Alt_w
     else
       Unknown
   end else begin

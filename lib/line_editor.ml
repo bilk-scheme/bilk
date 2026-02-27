@@ -33,6 +33,7 @@ type t = {
   config : config;
   term : Terminal.t;
   history : History.t;
+  yank_buffer : string ref;
 }
 
 (* Completion menu state — active while user is navigating candidates. *)
@@ -54,6 +55,7 @@ type edit_state = {
   mutable saved_input : string;  (* saved before history navigation *)
   mutable rendered_row : int;    (* cursor row at last render, for move-up *)
   mutable menu : menu_state option;
+  mutable mark : int option;     (* mark position for selection *)
   term_width : int;              (* terminal width, queried once at start *)
 }
 
@@ -61,7 +63,7 @@ let create config =
   let term = Terminal.enter_raw Unix.stdin in
   let history = History.create ~max_length:config.max_history () in
   Option.iter (fun f -> History.load_from_file history f) config.history_file;
-  { config; term; history }
+  { config; term; history; yank_buffer = ref "" }
 
 let destroy t =
   Terminal.leave_raw t.term;
@@ -215,6 +217,79 @@ let strip_ansi s =
   done;
   Buffer.contents buf
 
+(* --- Selection helpers --- *)
+
+let region_bounds mark cursor =
+  match mark with
+  | None -> None
+  | Some m -> Some (min m cursor, max m cursor)
+
+(* Inject reverse-video ANSI codes around visible columns [start_col, end_col)
+   in a string that may already contain ANSI CSI sequences. *)
+let apply_selection_overlay line start_col end_col =
+  if start_col >= end_col then line
+  else
+    let len = String.length line in
+    let buf = Buffer.create (len + 16) in
+    let vis = ref 0 in
+    let i = ref 0 in
+    let in_selection = ref false in
+    while !i < len do
+      if line.[!i] = '\x1b' then begin
+        (* Copy ANSI escape sequence verbatim *)
+        let start = !i in
+        incr i;
+        if !i < len && line.[!i] = '[' then begin
+          incr i;
+          while !i < len && not (line.[!i] >= '\x40' && line.[!i] <= '\x7e') do
+            incr i
+          done;
+          if !i < len then incr i (* skip final byte *)
+        end;
+        Buffer.add_string buf (String.sub line start (!i - start));
+        (* Re-emit reverse video after any ANSI code within the selection.
+           This is necessary because \x1b[0m (full SGR reset) clears all
+           attributes including reverse video. Re-emitting \x1b[7m is
+           idempotent when already active, so it is safe after any code. *)
+        if !in_selection then
+          Buffer.add_string buf "\x1b[7m"
+      end else begin
+        (* Visible character *)
+        if !vis = start_col && not !in_selection then begin
+          Buffer.add_string buf "\x1b[7m";
+          in_selection := true
+        end;
+        if !vis = end_col && !in_selection then begin
+          Buffer.add_string buf "\x1b[27m";
+          in_selection := false
+        end;
+        Buffer.add_char buf line.[!i];
+        incr vis;
+        incr i
+      end
+    done;
+    (* Close reverse video if selection extends to end of line *)
+    if !in_selection then
+      Buffer.add_string buf "\x1b[27m";
+    Buffer.contents buf
+
+(* Extract the text within a region. *)
+let region_text text start end_exclusive =
+  String.sub text start (end_exclusive - start)
+
+(* Delete a region from the edit state, returning the deleted text.
+   Sets cursor to region start. *)
+let delete_region st start end_exclusive =
+  let text = content_string st in
+  let len = String.length text in
+  let deleted = region_text text start end_exclusive in
+  let before = String.sub text 0 start in
+  let after = String.sub text end_exclusive (len - end_exclusive) in
+  Buffer.clear st.content;
+  Buffer.add_string st.content (before ^ after);
+  st.cursor <- start;
+  deleted
+
 let effective_prompt t =
   if paredit_active t then
     let p = t.config.prompt in
@@ -263,12 +338,32 @@ let render_input t st =
       lines_of_text highlighted
     | None -> lines
   in
+  (* Apply selection overlay if mark is active *)
+  let display_lines = match region_bounds st.mark st.cursor with
+    | None -> highlighted_lines
+    | Some (region_start, region_end) ->
+      let row_offset = ref 0 in
+      List.mapi (fun i hl_line ->
+        let line_start = !row_offset in
+        let raw_line = List.nth lines i in
+        let line_len = String.length raw_line in
+        row_offset := line_start + line_len + 1; (* +1 for \n *)
+        let line_end = line_start + line_len in
+        (* Compute overlap of [line_start, line_end) with [region_start, region_end) *)
+        let sel_start = max region_start line_start in
+        let sel_end = min region_end line_end in
+        if sel_start < sel_end then
+          apply_selection_overlay hl_line (sel_start - line_start) (sel_end - line_start)
+        else
+          hl_line
+      ) highlighted_lines
+  in
   (* Write each line with appropriate prompt *)
   List.iteri (fun i _line ->
     let line_prompt = if i = 0 then prompt else cont_prompt in
     Terminal.write_string t.term line_prompt;
     let display_line =
-      if i < List.length highlighted_lines then List.nth highlighted_lines i
+      if i < List.length display_lines then List.nth display_lines i
       else ""
     in
     Terminal.write_string t.term display_line;
@@ -563,6 +658,7 @@ let read_input t =
     saved_input = "";
     rendered_row = 0;
     menu = None;
+    mark = None;
     term_width = max 40 cols;
   } in
   History.reset_nav t.history;
@@ -727,12 +823,18 @@ let read_input t =
       end
 
     | Terminal.Char c ->
+      st.mark <- None;
       insert_char_maybe_paredit c;
       render t st;
       loop ()
 
     | Terminal.Backspace ->
-      delete_backward_maybe_paredit ();
+      (match region_bounds st.mark st.cursor with
+       | Some (s, e) ->
+         let _ = delete_region st s e in
+         st.mark <- None
+       | None ->
+         delete_backward_maybe_paredit ());
       render t st;
       loop ()
 
@@ -742,12 +844,17 @@ let read_input t =
       loop ()
 
     | Terminal.Delete ->
-      if paredit_active t then begin
-        let text = content_string st in
-        let rt = get_readtable t in
-        apply_paredit_result st (Paredit.delete_paredit rt text st.cursor)
-      end else
-        delete_forward st;
+      (match region_bounds st.mark st.cursor with
+       | Some (s, e) ->
+         let _ = delete_region st s e in
+         st.mark <- None
+       | None ->
+         if paredit_active t then begin
+           let text = content_string st in
+           let rt = get_readtable t in
+           apply_paredit_result st (Paredit.delete_paredit rt text st.cursor)
+         end else
+           delete_forward st);
       render t st;
       loop ()
 
@@ -802,7 +909,12 @@ let read_input t =
       loop ()
 
     | Terminal.Ctrl_w ->
-      kill_word_backward st;
+      (match region_bounds st.mark st.cursor with
+       | Some (s, e) ->
+         t.yank_buffer := delete_region st s e;
+         st.mark <- None
+       | None ->
+         kill_word_backward st);
       render t st;
       loop ()
 
@@ -978,6 +1090,38 @@ let read_input t =
         apply_paredit_result st (Paredit.backward_down rt text st.cursor);
         render t st
       end;
+      loop ()
+
+    | Terminal.Ctrl_space ->
+      (* Toggle mark: set at cursor if unset, clear if set *)
+      st.mark <- (match st.mark with None -> Some st.cursor | Some _ -> None);
+      render t st;
+      loop ()
+
+    | Terminal.Alt_w ->
+      (* Copy region to yank buffer, clear mark *)
+      (match region_bounds st.mark st.cursor with
+       | Some (s, e) ->
+         let text = content_string st in
+         t.yank_buffer := region_text text s e;
+         st.mark <- None;
+         render t st
+       | None -> ());
+      loop ()
+
+    | Terminal.Ctrl_y ->
+      (* Yank: insert yank buffer contents at cursor *)
+      if !(t.yank_buffer) <> "" then begin
+        st.mark <- None;
+        insert_string st !(t.yank_buffer);
+        render t st
+      end;
+      loop ()
+
+    | Terminal.Ctrl_g ->
+      (* Clear mark *)
+      st.mark <- None;
+      render t st;
       loop ()
 
     | Terminal.Escape ->
